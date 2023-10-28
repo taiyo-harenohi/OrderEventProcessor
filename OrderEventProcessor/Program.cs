@@ -1,12 +1,9 @@
 ﻿using Npgsql;
-using System;
 using System.Data;
 using System.Text;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using System.Collections.Generic;
 using System.Text.Json;
-using System.Threading.Tasks;
 
 namespace OrderEventProcessor
 {
@@ -130,6 +127,7 @@ namespace OrderEventProcessor
                 command.Parameters.AddWithValue("currency", values["currency"].ToString());
                 await command.ExecuteNonQueryAsync();
 
+
                 // if there is paymentEvent waiting
                 if (waitingOrder.ContainsKey(values["id"].ToString()))
                 {
@@ -150,7 +148,6 @@ namespace OrderEventProcessor
         /// <returns></returns>
         private static async Task FindDataAsync(string message, NpgsqlConnection con)
         {
-            Console.WriteLine("Looking for data");
             string status = "";
             Dictionary<string, string> orders = new Dictionary<string, string>();
             var values = JsonSerializer.Deserialize<Dictionary<string, object>>(message);
