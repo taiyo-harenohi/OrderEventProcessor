@@ -7,12 +7,12 @@ using RabbitMQ.Client.Events;
 using System.Collections.Generic;
 // using Newtonsoft.Json;
 using System.Text.Json;
+using System.Reflection.PortableExecutable;
 
 namespace OrderEventProcessor
 {
     internal class Program
     {
-        private static Dictionary<string, string> orders = new Dictionary<string, string>();
         static void Main(string[] args)
         {
             OpenConnection();
@@ -25,7 +25,6 @@ namespace OrderEventProcessor
                 con.Open();
                 if (con.State == ConnectionState.Open)
                 {
-                    Console.WriteLine("Connected to the server");
                     CreateTable(con);
                     ConnectRabbit(con);
                 }
@@ -36,7 +35,6 @@ namespace OrderEventProcessor
         {
             var command = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS orders(ID VARCHAR(5) PRIMARY KEY NOT NULL, product VARCHAR(6) NOT NULL, total DECIMAL NOT NULL, currency VARCHAR(3) NOT NULL, status VARCHAR(20));", con);
             command.ExecuteNonQuery();
-            Console.WriteLine("Table created");
         }
 
         private static NpgsqlConnection GetConnection()
@@ -76,17 +74,18 @@ namespace OrderEventProcessor
                 if (headers != null && headers.ContainsKey("X-MsgType"))
                 {
                     var msgTypeHeader = Encoding.UTF8.GetString((byte[])headers["X-MsgType"]);
+                    Console.WriteLine(msgTypeHeader);
 
                     if (msgTypeHeader == "OrderEvent")
                     {
                         InsertData(message, con);
                     }
-                    else if (msgTypeHeader == "PaymentEvent")
+                    if (msgTypeHeader == "PaymentEvent")
                     {
-                        FindData(message, con);
+                        UpdateData(FindData(message, con), con);
                     }
                 }
-                channel.BasicAck(ea.DeliveryTag, false);
+                //channel.BasicAck(ea.DeliveryTag, false);
             };
 
             channel.BasicConsume(orderQueueName, true, receivedEvent);
@@ -96,7 +95,6 @@ namespace OrderEventProcessor
 
         private static void InsertData(string message, NpgsqlConnection con)
         {
-            // var values = JsonConvert.DeserializeObject<Dictionary<string, string>>(message);
             var values = JsonSerializer.Deserialize<Dictionary<string, object>>(message); 
             
             if (values != null)
@@ -113,18 +111,59 @@ namespace OrderEventProcessor
             
         }
 
-        private static void FindData(string message, NpgsqlConnection con)
+        private static Dictionary<string,string> FindData(string message, NpgsqlConnection con)
         {
+            string status = "";
+            Dictionary<string, string> orders = new Dictionary<string, string>();
             var values = JsonSerializer.Deserialize<Dictionary<string, object>>(message);
 
             if (values != null)
             {
                 var command = new NpgsqlCommand($"SELECT * FROM orders WHERE ID = @id;", con);
                 command.Parameters.AddWithValue("id", values["orderId"].ToString());
-                var result = command.ExecuteScalar();
+                var result = command.ExecuteReader();
 
-                Console.WriteLine(result);
+                while (result.Read())
+                {
+                    status = CheckData(values, result[2].ToString());
+                    if (status != null)
+                    {
+                        Console.WriteLine("Order: {0}\t Product: {1}\t Total: {2}\t Status: {3}", result[0], result[1], result[2], status);
+                        orders.Add("id", result[0].ToString());
+                        orders.Add("product", result[1].ToString());
+                        orders.Add("total", result[2].ToString());
+                        orders.Add("currency", result[3].ToString());
+                        orders.Add("status", status);
+                    }
+                }
+                result.Close();
+                result.DisposeAsync();
             }
+            return orders;
+        }
+
+        private static string CheckData(Dictionary<string, object> values, string compare)
+        {
+            if (Convert.ToDecimal(values["amount"].ToString()) != Convert.ToDecimal(compare))
+            {
+                return "PARTIALLY PAID";
+            }
+            else
+            {
+                return "PAID";
+            }
+        }
+
+        private static void UpdateData(Dictionary<string, string> orders, NpgsqlConnection con)
+        {
+            var update = new NpgsqlCommand($"UPDATE orders SET product = @product, total = @total, currency = @currency, status = @status;", con);
+            update.Parameters.AddWithValue("id", orders["id"]);
+            update.Parameters.AddWithValue("product", orders["product"]);
+            decimal total = decimal.Parse(orders["total"]);
+            update.Parameters.AddWithValue("total", total);
+            update.Parameters.AddWithValue("currency", orders["currency"]);
+            update.Parameters.AddWithValue("status", orders["status"]);
+            update.ExecuteNonQuery();
         }
     }
 }
