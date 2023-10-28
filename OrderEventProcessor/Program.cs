@@ -5,6 +5,8 @@ using System.Text;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System.Collections.Generic;
+// using Newtonsoft.Json;
+using System.Text.Json;
 
 namespace OrderEventProcessor
 {
@@ -14,7 +16,6 @@ namespace OrderEventProcessor
         static void Main(string[] args)
         {
             OpenConnection();
-            Console.ReadKey();
         }
 
         private static void OpenConnection()
@@ -26,14 +27,14 @@ namespace OrderEventProcessor
                 {
                     Console.WriteLine("Connected to the server");
                     CreateTable(con);
-                    ConnectRabbit();
+                    ConnectRabbit(con);
                 }
             }
         }
 
         private static void CreateTable(NpgsqlConnection con)
         {
-            var command = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS orders(ID VARCHAR(5) PRIMARY KEY NOT NULL, product VARCHAR(5) NOT NULL, total DECIMAL NOT NULL, currency VARCHAR(3) NOT NULL);", con);
+            var command = new NpgsqlCommand("CREATE TABLE IF NOT EXISTS orders(ID VARCHAR(5) PRIMARY KEY NOT NULL, product VARCHAR(6) NOT NULL, total DECIMAL NOT NULL, currency VARCHAR(3) NOT NULL, status VARCHAR(20));", con);
             command.ExecuteNonQuery();
             Console.WriteLine("Table created");
         }
@@ -43,7 +44,7 @@ namespace OrderEventProcessor
             return new NpgsqlConnection(@"Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres");
         }
 
-        private static void ConnectRabbit()
+        private static void ConnectRabbit(NpgsqlConnection con)
         {
             var factory = new ConnectionFactory
             {
@@ -56,44 +57,74 @@ namespace OrderEventProcessor
 
             string exchangeName = "order";
             string orderQueueName = "order_queue";
-            string paymentQueueName = "payment_queue";
 
-            channel.ExchangeDeclare(exchangeName, ExchangeType.Headers, true);
+            channel.ExchangeDeclare(exchangeName, ExchangeType.Direct, false);
             channel.QueueDeclare(orderQueueName, true, false, false);
-            channel.QueueDeclare(paymentQueueName, true, false, false);
 
             // Bind queues to the exchange with routing keys
             channel.QueueBind(orderQueueName, exchangeName, "order");
-            channel.QueueBind(paymentQueueName, exchangeName, "payment");
 
-            var orderConsumer = new EventingBasicConsumer(channel);
-            var paymentConsumer = new EventingBasicConsumer(channel);
+            var receivedEvent = new EventingBasicConsumer(channel);
 
-            orderConsumer.Received += (model, ea) =>
+            receivedEvent.Received += (model, ea) =>
             {
                 // Insert order record into PostgreSQL
                 var body = ea.Body.ToArray();
                 var message = Encoding.UTF8.GetString(body);
-                ConvertMessage(message);
-                Console.WriteLine($"Received {message.ToString()}");
+                var headers = ea.BasicProperties.Headers;
+
+                if (headers != null && headers.ContainsKey("X-MsgType"))
+                {
+                    var msgTypeHeader = Encoding.UTF8.GetString((byte[])headers["X-MsgType"]);
+
+                    if (msgTypeHeader == "OrderEvent")
+                    {
+                        InsertData(message, con);
+                    }
+                    else if (msgTypeHeader == "PaymentEvent")
+                    {
+                        FindData(message, con);
+                    }
+                }
+                channel.BasicAck(ea.DeliveryTag, false);
             };
 
-            paymentConsumer.Received += (model, ea) =>
-            {
-                // Process PaymentEvent messages
-                // Check if related order records are fully paid and write a console message
-            };
-
-            channel.BasicConsume(orderQueueName, true, orderConsumer);
-            channel.BasicConsume(paymentQueueName, true, paymentConsumer);
+            channel.BasicConsume(orderQueueName, true, receivedEvent);
 
             Console.ReadLine(); 
         }
 
-        private static void ConvertMessage(string message)
+        private static void InsertData(string message, NpgsqlConnection con)
         {
+            // var values = JsonConvert.DeserializeObject<Dictionary<string, string>>(message);
+            var values = JsonSerializer.Deserialize<Dictionary<string, object>>(message); 
+            
+            if (values != null)
+            {
+                var command = new NpgsqlCommand($"INSERT INTO orders (ID, product, total, currency) VALUES (@id, @product, @total, @currency) ON CONFLICT (ID) DO UPDATE " +
+                                                $"SET product = @product, total = @total, currency = @currency;", con);
+                command.Parameters.AddWithValue("id", values["id"].ToString());
+                command.Parameters.AddWithValue("product", values["product"].ToString());
+                decimal total = decimal.Parse(values["total"].ToString());
+                command.Parameters.AddWithValue("total", total);
+                command.Parameters.AddWithValue("currency", values["currency"].ToString());
+                command.ExecuteNonQuery();
+            }
+            
+        }
 
-            Console.WriteLine(orders);
+        private static void FindData(string message, NpgsqlConnection con)
+        {
+            var values = JsonSerializer.Deserialize<Dictionary<string, object>>(message);
+
+            if (values != null)
+            {
+                var command = new NpgsqlCommand($"SELECT * FROM orders WHERE ID = @id;", con);
+                command.Parameters.AddWithValue("id", values["orderId"].ToString());
+                var result = command.ExecuteScalar();
+
+                Console.WriteLine(result);
+            }
         }
     }
 }
